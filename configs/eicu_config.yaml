@@ -1,0 +1,250 @@
+# =============================================================================
+# Clinical Event Log Builder - eICU-CRD Configuration
+# =============================================================================
+# eICU Collaborative Research Database 기반 Level 0 이벤트 로그 설정.
+# L1/L2 매핑 없이 Raw 이벤트만 추출합니다.
+#
+# eICU 타임스탬프 처리:
+#   eICU는 절대 타임스탬프 대신 ICU 입실 기준 분 단위 Offset을 사용합니다.
+#   모든 타임스탬프는 다음 공식으로 합성(Synthetic) 절대 시간을 생성합니다:
+#     TIMESTAMP_ADD(
+#       TIMESTAMP(DATETIME(DATE(hospitaldischargeyear, 1, 1), unitadmittime24)),
+#       INTERVAL offset MINUTE
+#     )
+#   실제 날짜는 비식별화되었으나, 사건 간 순서와 간격이 보존되므로
+#   프로세스 마이닝 분석 결과에는 영향이 없습니다.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# source: eICU 원시 데이터가 있는 BigQuery 프로젝트/데이터셋
+# -----------------------------------------------------------------------------
+source:
+  project: "physionet-data"
+  datasets:
+    eicu: "eicu_crd"
+
+
+# -----------------------------------------------------------------------------
+# target: 결과물(이벤트 로그)을 저장할 BigQuery 프로젝트/데이터셋
+# -----------------------------------------------------------------------------
+target:
+  project: "YOUR_PROJECT_ID"
+  dataset: "event_logs"
+
+
+# -----------------------------------------------------------------------------
+# cohort: 코호트 필터링 비활성화 (전체 환자 대상)
+# -----------------------------------------------------------------------------
+cohort:
+  enabled: false
+
+
+# =============================================================================
+# YAML 앵커 정의 (DRY: Don't Repeat Yourself)
+# =============================================================================
+# eICU 이벤트 테이블은 공통적으로:
+#   1) patient 테이블과 JOIN하여 base timestamp (anchor_time) 확보
+#   2) 3-tier ID 매핑: uniquepid → subject_id,
+#      patienthealthsystemstayid → hadm_id, patientunitstayid → stay_id
+# =============================================================================
+
+# patient 테이블 JOIN 설정
+_patient_join: &patient_join
+  table: "patient"
+  module: "eicu"
+  alias: "pat"
+  "on": "src.patientunitstayid = pat.patientunitstayid"
+
+# 이벤트 테이블용 ID 매핑 (JOIN된 pat 테이블에서 가져옴)
+_event_ids: &event_ids
+  subject_id_column: "pat.uniquepid"
+  hadm_id_column: "pat.patienthealthsystemstayid"
+  stay_id_column: "patientunitstayid"
+  case_id_column: "patientunitstayid"
+
+# patient 테이블 자체 이벤트용 ID 매핑 (src에서 직접 가져옴)
+_patient_ids: &patient_ids
+  subject_id_column: "uniquepid"
+  hadm_id_column: "patienthealthsystemstayid"
+  stay_id_column: "patientunitstayid"
+  case_id_column: "patientunitstayid"
+
+
+# -----------------------------------------------------------------------------
+# event_tables: 이벤트 추출 대상 테이블 정의
+# -----------------------------------------------------------------------------
+event_tables:
+
+  # =========================================================================
+  # journey: patient 테이블에서 입퇴원/입퇴실 이벤트 추출
+  # =========================================================================
+  journey:
+    # --- 병원 입퇴원 (Hospital Admission/Discharge) ---
+    # hospitaladmitoffset: ICU 입실 기준 병원 입원 시점 (보통 음수)
+    # hospitaldischargeoffset: ICU 입실 기준 병원 퇴원 시점
+    - table: "patient"
+      module: "eicu"
+      <<: *patient_ids
+      filter: "hospitaldischargeyear IS NOT NULL AND unitadmittime24 IS NOT NULL"
+      start_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(src.hospitaldischargeyear, 1, 1), src.unitadmittime24)), INTERVAL src.hospitaladmitoffset MINUTE)"
+      end_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(src.hospitaldischargeyear, 1, 1), src.unitadmittime24)), INTERVAL src.hospitaldischargeoffset MINUTE)"
+      start_activity: "'hospital_admit'"
+      end_activity: "CONCAT('hospital_disch_', COALESCE(src.hospitaldischargestatus, 'Unknown'))"
+
+    # --- ICU 입퇴실 (Unit Admission/Discharge) ---
+    # unitadmittime24: ICU 입실 시각 (offset = 0, 즉 anchor 그 자체)
+    # unitdischargeoffset: ICU 퇴실 시점
+    - table: "patient"
+      module: "eicu"
+      <<: *patient_ids
+      filter: "hospitaldischargeyear IS NOT NULL AND unitadmittime24 IS NOT NULL"
+      start_column: "TIMESTAMP(DATETIME(DATE(src.hospitaldischargeyear, 1, 1), src.unitadmittime24))"
+      end_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(src.hospitaldischargeyear, 1, 1), src.unitadmittime24)), INTERVAL src.unitdischargeoffset MINUTE)"
+      start_activity: "CONCAT('unit_admit_', COALESCE(src.unitadmitsource, 'Unknown'))"
+      end_activity: "CONCAT('unit_disch_', COALESCE(src.unitdischargelocation, 'Unknown'))"
+
+
+  # =========================================================================
+  # in_out: 사용하지 않음
+  # =========================================================================
+  in_out: []
+
+
+  # =========================================================================
+  # duration: 사용하지 않음
+  # =========================================================================
+  duration: []
+
+
+  # =========================================================================
+  # one_off: 단일 시점 이벤트
+  # =========================================================================
+  # 모든 이벤트 테이블은 patient 테이블과 JOIN하여 base timestamp 확보
+  # =========================================================================
+  one_off:
+    # --- lab (검사 결과) ---
+    # labresultoffset: 검사 결과 시점
+    # labname: 검사명 (text, e.g., 'sodium', 'glucose')
+    - table: "lab"
+      module: "eicu"
+      <<: *event_ids
+      join: *patient_join
+      filter: "labresultoffset IS NOT NULL AND labname IS NOT NULL"
+      timestamp_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(pat.hospitaldischargeyear, 1, 1), pat.unitadmittime24)), INTERVAL src.labresultoffset MINUTE)"
+      activity_column: "src.labname"
+
+    # --- diagnosis (진단) ---
+    # diagnosisoffset: 진단 입력 시점
+    # diagnosisstring: 계층적 진단 경로 (pipe-separated)
+    - table: "diagnosis"
+      module: "eicu"
+      <<: *event_ids
+      join: *patient_join
+      filter: "diagnosisoffset IS NOT NULL AND diagnosisstring IS NOT NULL"
+      timestamp_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(pat.hospitaldischargeyear, 1, 1), pat.unitadmittime24)), INTERVAL src.diagnosisoffset MINUTE)"
+      activity_column: "src.diagnosisstring"
+
+    # --- medication (투약 처방) ---
+    # drugstartoffset: 투약 시작 시점
+    # drugname: 약물명 (text)
+    - table: "medication"
+      module: "eicu"
+      <<: *event_ids
+      join: *patient_join
+      filter: "drugstartoffset IS NOT NULL AND drugname IS NOT NULL"
+      timestamp_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(pat.hospitaldischargeyear, 1, 1), pat.unitadmittime24)), INTERVAL src.drugstartoffset MINUTE)"
+      activity_column: "src.drugname"
+
+    # --- nurseCharting (간호 기록) ---
+    # nursingchartoffset: 간호 기록 시점
+    # nursingchartcelltypevalname: 기록 항목명
+    # 주의: 매우 큰 테이블 (수억 행), 필요 시 filter 추가 권장
+    - table: "nursecharting"
+      module: "eicu"
+      <<: *event_ids
+      join: *patient_join
+      filter: "nursingchartoffset IS NOT NULL AND nursingchartcelltypevalname IS NOT NULL"
+      timestamp_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(pat.hospitaldischargeyear, 1, 1), pat.unitadmittime24)), INTERVAL src.nursingchartoffset MINUTE)"
+      activity_column: "src.nursingchartcelltypevalname"
+
+    # --- infusionDrug (지속 주입 약물) ---
+    # infusionoffset: 주입 기록 시점 (snapshot, 시작/종료 아님)
+    # drugname: 약물명 (text, e.g., 'Dopamine (mcg/kg/min)')
+    - table: "infusiondrug"
+      module: "eicu"
+      <<: *event_ids
+      join: *patient_join
+      filter: "infusionoffset IS NOT NULL AND drugname IS NOT NULL"
+      timestamp_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(pat.hospitaldischargeyear, 1, 1), pat.unitadmittime24)), INTERVAL src.infusionoffset MINUTE)"
+      activity_column: "src.drugname"
+
+    # --- intakeOutput (섭취/배출량) ---
+    # intakeoutputoffset: 측정 시점
+    # celllabel: 측정 항목명 (text)
+    - table: "intakeoutput"
+      module: "eicu"
+      <<: *event_ids
+      join: *patient_join
+      filter: "intakeoutputoffset IS NOT NULL AND celllabel IS NOT NULL"
+      timestamp_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(pat.hospitaldischargeyear, 1, 1), pat.unitadmittime24)), INTERVAL src.intakeoutputoffset MINUTE)"
+      activity_column: "src.celllabel"
+
+    # --- treatment (처치/치료) ---
+    # treatmentoffset: 처치 시점
+    # treatmentstring: 계층적 처치 경로 (pipe-separated)
+    - table: "treatment"
+      module: "eicu"
+      <<: *event_ids
+      join: *patient_join
+      filter: "treatmentoffset IS NOT NULL AND treatmentstring IS NOT NULL"
+      timestamp_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(pat.hospitaldischargeyear, 1, 1), pat.unitadmittime24)), INTERVAL src.treatmentoffset MINUTE)"
+      activity_column: "src.treatmentstring"
+
+    # --- microLab (미생물 검사) ---
+    # culturetakenoffset: 배양 채취 시점
+    # organism: 검출 균명 (text)
+    - table: "microlab"
+      module: "eicu"
+      <<: *event_ids
+      join: *patient_join
+      filter: "culturetakenoffset IS NOT NULL AND organism IS NOT NULL"
+      timestamp_column: "TIMESTAMP_ADD(TIMESTAMP(DATETIME(DATE(pat.hospitaldischargeyear, 1, 1), pat.unitadmittime24)), INTERVAL src.culturetakenoffset MINUTE)"
+      activity_column: "src.organism"
+
+
+# -----------------------------------------------------------------------------
+# metadata: 비활성화
+# eICU의 환자 속성(age, gender 등)은 patient 테이블에 있으나 컬럼 구조가
+# MIMIC-IV patients 테이블과 달라 별도 매핑이 필요하다. 현재 미구현.
+# -----------------------------------------------------------------------------
+metadata:
+  enabled: false
+
+
+# -----------------------------------------------------------------------------
+# mappings: L1/L2 매핑 비활성화 (Level 0 Raw 이벤트만)
+# -----------------------------------------------------------------------------
+mappings:
+  l1:
+    enabled: false
+  l2:
+    enabled: false
+
+
+# -----------------------------------------------------------------------------
+# output: 출력 테이블/뷰 이름
+# -----------------------------------------------------------------------------
+output:
+  baseline_table: "eicu_baseline_event_log"
+  analysis_view: "eicu_analysis_event_log"
+
+
+# -----------------------------------------------------------------------------
+# analysis: Analysis Event Log 뷰 설정
+# -----------------------------------------------------------------------------
+# eICU에서는 patientunitstayid (= stay_id)를 case_id로 사용
+analysis:
+  case_id: "stay_id"
+  activity_level: "l0"
+  include_columns: []

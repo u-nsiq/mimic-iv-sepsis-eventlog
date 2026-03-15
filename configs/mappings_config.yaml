@@ -1,0 +1,510 @@
+# =============================================================================
+# Mapping Table Builder - Configuration
+# =============================================================================
+# 이 파일은 L1/L2 매핑 테이블 생성 규칙을 정의합니다.
+# EL_Specification.md Phase 1에 따라 10개 이벤트 테이블의 매핑 규칙을 명세합니다.
+#
+# 사용법:
+#   python run.py build-mappings --config configs/config.yaml \
+#                                --mappings-config configs/mappings_config.yaml --dry-run
+# =============================================================================
+
+
+# =============================================================================
+# L1 매핑: source_table + activity_raw → activity_l1
+# =============================================================================
+# 규칙 타입:
+#   reference_join : 참조 테이블 JOIN으로 L1 매핑 (예: chartevents → d_items.category)
+#   dict           : 명시적 값 → 값 매핑 (BigQuery 쿼리 없음)
+#   expression     : SQL 표현식으로 activity_raw와 L1 생성
+#   custom_sql     : 직접 작성한 SQL (출력: source_table, activity_raw, activity_l1, is_excluded)
+# =============================================================================
+l1:
+  output_table: "l1_mapping"
+  rules:
+
+    # =========================================================================
+    # 1.1. 매핑 기반 테이블 (7개)
+    # =========================================================================
+
+    # -----------------------------------------------------------------
+    # [chartevents] L0(itemid) → L1(d_items.category) | 1,864 → 40종
+    # -----------------------------------------------------------------
+    - source_table: "chartevents"
+      type: "reference_join"
+      source_module: "icu"
+      activity_raw_column: "itemid"
+      reference_table: "d_items"
+      reference_module: "icu"
+      join_column: "itemid"
+      l1_column: "category"
+
+    # -----------------------------------------------------------------
+    # [labevents] L0(itemid) → L1(d_labitems.fluid) | 704 → 9종
+    # -----------------------------------------------------------------
+    - source_table: "labevents"
+      type: "reference_join"
+      source_module: "hosp"
+      activity_raw_column: "itemid"
+      reference_table: "d_labitems"
+      reference_module: "hosp"
+      join_column: "itemid"
+      l1_column: "fluid"
+
+    # -----------------------------------------------------------------
+    # [microbiologyevents] L0(spec_type_desc|test_name) → L1(test_name) | 424 → 109종
+    # config.yaml의 L0 = CONCAT(spec_type_desc, ' | ', test_name)
+    # L1 = test_name (L0에서 ' | ' 이후 부분 추출)
+    # -----------------------------------------------------------------
+    - type: "custom_sql"
+      sql: |
+        SELECT DISTINCT
+          'microbiologyevents' AS source_table,
+          CONCAT(src.spec_type_desc, ' | ', src.test_name) AS activity_raw,
+          CAST(src.test_name AS STRING) AS activity_l1,
+          FALSE AS is_excluded
+        FROM `physionet-data.mimiciv_3_1_hosp.microbiologyevents` AS src
+        WHERE src.spec_type_desc IS NOT NULL
+          AND src.test_name IS NOT NULL
+
+    # -----------------------------------------------------------------
+    # [emar] L0(pharmacy_id) → L1(NDC 제형) | 878,946 → 31종
+    # 매핑 경로: emar.pharmacy_id → prescriptions.ndc → ndc_to_doseform 참조 테이블
+    # 전제: ndc_to_doseform 테이블이 target 데이터셋에 사전 적재되어 있어야 함
+    #       (컬럼: ndc STRING, dose_form STRING)
+    # 매핑 실패 (ndc NULL/0, 사전 미등재 등)는 is_excluded = TRUE 처리
+    # -----------------------------------------------------------------
+    - type: "custom_sql"
+      sql: |
+        SELECT DISTINCT
+          'emar' AS source_table,
+          CAST(dedup.pharmacy_id AS STRING) AS activity_raw,
+          dedup.dose_form AS activity_l1,
+          FALSE AS is_excluded
+        FROM (
+          SELECT e.pharmacy_id, ANY_VALUE(ndc_map.dose_form) AS dose_form
+          FROM `physionet-data.mimiciv_3_1_hosp.emar` AS e
+          JOIN `physionet-data.mimiciv_3_1_hosp.prescriptions` AS p
+            ON e.pharmacy_id = p.pharmacy_id
+          JOIN `YOUR_PROJECT_ID.event_logs.ndc_to_doseform` AS ndc_map
+            ON p.ndc = ndc_map.ndc
+          WHERE p.ndc IS NOT NULL
+            AND p.ndc != '0'
+          GROUP BY e.pharmacy_id
+        ) AS dedup
+
+    # -----------------------------------------------------------------
+    # [inputevents] L0(start_/complete_ + itemid) → L1(start_/complete_ + d_items.category)
+    # config.yaml에서 start/complete를 one_off 2개로 분리했으므로
+    # L0에 접두사가 포함됨 → L1에도 동일 접두사 + category
+    # 248종 itemid → 7종 category (접두사 포함 시 14종)
+    # -----------------------------------------------------------------
+    - type: "custom_sql"
+      sql: |
+        SELECT DISTINCT
+          'inputevents' AS source_table,
+          CONCAT('start_', CAST(src.itemid AS STRING)) AS activity_raw,
+          CONCAT('start_', CAST(ref.category AS STRING)) AS activity_l1,
+          FALSE AS is_excluded
+        FROM `physionet-data.mimiciv_3_1_icu.inputevents` AS src
+        JOIN `physionet-data.mimiciv_3_1_icu.d_items` AS ref
+          ON src.itemid = ref.itemid
+        UNION DISTINCT
+        SELECT DISTINCT
+          'inputevents' AS source_table,
+          CONCAT('complete_', CAST(src.itemid AS STRING)) AS activity_raw,
+          CONCAT('complete_', CAST(ref.category AS STRING)) AS activity_l1,
+          FALSE AS is_excluded
+        FROM `physionet-data.mimiciv_3_1_icu.inputevents` AS src
+        JOIN `physionet-data.mimiciv_3_1_icu.d_items` AS ref
+          ON src.itemid = ref.itemid
+
+    # -----------------------------------------------------------------
+    # [outputevents] L0(itemid) → L1(d_items.category) | 69 → 2종
+    # -----------------------------------------------------------------
+    - source_table: "outputevents"
+      type: "reference_join"
+      source_module: "icu"
+      activity_raw_column: "itemid"
+      reference_table: "d_items"
+      reference_module: "icu"
+      join_column: "itemid"
+      l1_column: "category"
+
+    # -----------------------------------------------------------------
+    # [procedureevents] L0(start_/complete_ + itemid) → L1(start_/complete_ + d_items.category)
+    # 151종 itemid → 12종 category (접두사 포함 시 24종)
+    # -----------------------------------------------------------------
+    - type: "custom_sql"
+      sql: |
+        SELECT DISTINCT
+          'procedureevents' AS source_table,
+          CONCAT('start_', CAST(src.itemid AS STRING)) AS activity_raw,
+          CONCAT('start_', CAST(ref.category AS STRING)) AS activity_l1,
+          FALSE AS is_excluded
+        FROM `physionet-data.mimiciv_3_1_icu.procedureevents` AS src
+        JOIN `physionet-data.mimiciv_3_1_icu.d_items` AS ref
+          ON src.itemid = ref.itemid
+        UNION DISTINCT
+        SELECT DISTINCT
+          'procedureevents' AS source_table,
+          CONCAT('complete_', CAST(src.itemid AS STRING)) AS activity_raw,
+          CONCAT('complete_', CAST(ref.category AS STRING)) AS activity_l1,
+          FALSE AS is_excluded
+        FROM `physionet-data.mimiciv_3_1_icu.procedureevents` AS src
+        JOIN `physionet-data.mimiciv_3_1_icu.d_items` AS ref
+          ON src.itemid = ref.itemid
+
+    # =========================================================================
+    # 1.2. 로직 기반 테이블 (3개)
+    # =========================================================================
+    # admissions, icustays, transfers는 config.yaml에서 L0에 방향 접두사를 포함시킴
+    # → L0 자체가 L1 역할을 하므로 identity 매핑 (activity_raw = activity_l1)
+
+    # -----------------------------------------------------------------
+    # [admissions] L0 → L1 (identity)
+    # L0 = admit_[type], disch_[type], death
+    # L1 = 동일값
+    # -----------------------------------------------------------------
+    - type: "custom_sql"
+      sql: |
+        SELECT DISTINCT
+          'admissions' AS source_table,
+          activity_raw,
+          activity_raw AS activity_l1,
+          FALSE AS is_excluded
+        FROM (
+          SELECT CONCAT('admit_', admission_type) AS activity_raw
+          FROM `physionet-data.mimiciv_3_1_hosp.admissions`
+          UNION DISTINCT
+          SELECT
+            CASE WHEN deathtime IS NOT NULL THEN 'death'
+                 ELSE CONCAT('disch_', admission_type)
+            END AS activity_raw
+          FROM `physionet-data.mimiciv_3_1_hosp.admissions`
+        )
+
+    # -----------------------------------------------------------------
+    # [icustays] L0 → L1 (identity)
+    # L0 = icu_admit_[first_careunit], icu_disch_[last_careunit]
+    # L1 = 동일값
+    # -----------------------------------------------------------------
+    - type: "custom_sql"
+      sql: |
+        SELECT DISTINCT
+          'icustays' AS source_table,
+          activity_raw,
+          activity_raw AS activity_l1,
+          FALSE AS is_excluded
+        FROM (
+          SELECT CONCAT('icu_admit_', first_careunit) AS activity_raw
+          FROM `physionet-data.mimiciv_3_1_icu.icustays`
+          UNION DISTINCT
+          SELECT CONCAT('icu_disch_', last_careunit) AS activity_raw
+          FROM `physionet-data.mimiciv_3_1_icu.icustays`
+        )
+
+    # -----------------------------------------------------------------
+    # [transfers] L0 → L1 (identity)
+    # L0 = transfer_in_[careunit], transfer_out_[careunit]
+    # L1 = 동일값
+    # filter: eventtype = 'transfer'
+    # -----------------------------------------------------------------
+    - type: "custom_sql"
+      sql: |
+        SELECT DISTINCT
+          'transfers' AS source_table,
+          activity_raw,
+          activity_raw AS activity_l1,
+          FALSE AS is_excluded
+        FROM (
+          SELECT CONCAT('transfer_in_', careunit) AS activity_raw
+          FROM `physionet-data.mimiciv_3_1_hosp.transfers`
+          WHERE eventtype = 'transfer' AND careunit IS NOT NULL
+          UNION DISTINCT
+          SELECT CONCAT('transfer_out_', careunit) AS activity_raw
+          FROM `physionet-data.mimiciv_3_1_hosp.transfers`
+          WHERE eventtype = 'transfer' AND careunit IS NOT NULL
+        )
+
+
+# =============================================================================
+# L2 매핑: activity_l1 → activity_l2
+# =============================================================================
+# 규칙 타입:
+#   dict        : 명시적 L1 → L2 매핑
+#   conditional : L1 테이블 기반 CASE WHEN (L1 빌드 후 실행됨)
+#   custom_sql  : 직접 작성한 SQL (출력: activity_l1, activity_l2, is_excluded)
+# =============================================================================
+l2:
+  output_table: "l2_mapping"
+  rules:
+
+    # =========================================================================
+    # 1.1.1. [chartevents] L1(d_items.category) → L2(커스텀 그룹) | 40 → 11종
+    # =========================================================================
+    - type: "dict"
+      mapping:
+        # Vital Signs (2)
+        "Routine Vital Signs": "Vital Signs"
+        "Cardiovascular (Pulses)": "Vital Signs"
+        # Monitoring (11)
+        "Alarms": "Monitoring"
+        "Cardiovascular (Pacer Data)": "Monitoring"
+        "Centrimag": "Monitoring"
+        "Durable VAD": "Monitoring"
+        "ECMO": "Monitoring"
+        "Heartware": "Monitoring"
+        "IABP": "Monitoring"
+        "Impella": "Monitoring"
+        "NICOM": "Monitoring"
+        "PiCCO": "Monitoring"
+        "Tandem Heart": "Monitoring"
+        # Respiratory (2)
+        "Respiratory": "Respiratory"
+        "Pulmonary": "Respiratory"
+        # Cardiovascular (2)
+        "Cardiovascular": "Cardiovascular"
+        "Hemodynamics": "Cardiovascular"
+        # Neurological (1)
+        "Neurological": "Neurological"
+        # Pain/Sedation (2)
+        "Pain/Sedation": "Pain/Sedation"
+        "RDOS": "Pain/Sedation"
+        # Labs (2)
+        "Labs": "Labs"
+        "Toxicology": "Labs"
+        # Intake/Output (4)
+        "GI/GU": "Intake/Output"
+        "Fluid Balance": "Intake/Output"
+        "Nutrition - Enteral": "Intake/Output"
+        "Nutrition - Parenteral": "Intake/Output"
+        # Treatments (5)
+        "Treatments": "Treatments"
+        "Medications": "Treatments"
+        "Access Lines - Invasive": "Treatments"
+        "Access Lines - Peripheral": "Treatments"
+        "Restraint/Support Systems": "Treatments"
+        # General (14)
+        "General": "General"
+        "Adm History/FHPA": "General"
+        "Block Charting Note": "General"
+        "MD Progress Note": "General"
+        "RNTriggerNote": "General"
+        "Scores - APACHE II": "General"
+        "Swallow Evaluation": "General"
+        "OB-GYN": "General"
+        "Skin - Assessment": "General"
+        "Skin - Incisions": "General"
+        "Skin - Impairment": "General"
+        "Dialysis": "General"
+        "Care Plans": "General"
+
+    # chartevents: 정의되지 않은 나머지 category → 'Other'
+    # conditional로 매핑되지 않은 chartevents L1을 처리
+    - type: "conditional"
+      source_tables: ["chartevents"]
+      conditions:
+        - when: "NOT IN ('Routine Vital Signs','Cardiovascular (Pulses)','Alarms','Cardiovascular (Pacer Data)','Centrimag','Durable VAD','ECMO','Heartware','IABP','Impella','NICOM','PiCCO','Tandem Heart','Respiratory','Pulmonary','Cardiovascular','Hemodynamics','Neurological','Pain/Sedation','RDOS','Labs','Toxicology','GI/GU','Fluid Balance','Nutrition - Enteral','Nutrition - Parenteral','Treatments','Medications','Access Lines - Invasive','Access Lines - Peripheral','Restraint/Support Systems','General','Adm History/FHPA','Block Charting Note','MD Progress Note','RNTriggerNote','Scores - APACHE II','Swallow Evaluation','OB-GYN','Skin - Assessment','Skin - Incisions','Skin - Impairment','Dialysis','Care Plans')"
+          value: "Other"
+      default: null
+
+    # =========================================================================
+    # [labevents] L1(d_labitems.fluid) → L2(d_labitems.category) | 9 → 3종
+    # d_labitems 테이블에서 fluid → category 관계를 직접 조회
+    # =========================================================================
+    - type: "custom_sql"
+      sql: |
+        SELECT
+          CAST(fluid AS STRING) AS activity_l1,
+          ANY_VALUE(CAST(category AS STRING)) AS activity_l2,
+          FALSE AS is_excluded
+        FROM `physionet-data.mimiciv_3_1_hosp.d_labitems`
+        WHERE fluid IS NOT NULL
+        GROUP BY fluid
+
+    # =========================================================================
+    # 1.1.2. [microbiologyevents] L1(test_name) → L2(spec_type_desc 기반 그룹) | 109 → 10종
+    # L1 = test_name이지만, L2는 spec_type_desc 기반으로 결정됨
+    # 동일 test_name이 여러 spec_type_desc와 연결될 수 있으므로 custom_sql로 처리
+    # =========================================================================
+    - type: "custom_sql"
+      sql: |
+        SELECT
+          test_name AS activity_l1,
+          ANY_VALUE(
+            CASE
+              WHEN UPPER(spec_type_desc) LIKE '%BLOOD%' THEN 'Blood Culture'
+              WHEN UPPER(spec_type_desc) LIKE '%URINE%' THEN 'Urine Culture'
+              WHEN UPPER(spec_type_desc) LIKE '%SPUTUM%'
+                OR UPPER(spec_type_desc) LIKE '%BRONCHO%'
+                OR UPPER(spec_type_desc) LIKE '%TRACH%'
+                OR UPPER(spec_type_desc) LIKE '%LUNG%'
+                OR UPPER(spec_type_desc) LIKE '%PLEURAL%' THEN 'Respiratory Culture'
+              WHEN UPPER(spec_type_desc) LIKE '%SWAB%' THEN 'Swab Culture'
+              WHEN UPPER(spec_type_desc) LIKE '%WOUND%'
+                OR UPPER(spec_type_desc) LIKE '%TISSUE%'
+                OR UPPER(spec_type_desc) LIKE '%ABSCESS%'
+                OR UPPER(spec_type_desc) LIKE '%PUS%'
+                OR UPPER(spec_type_desc) LIKE '%ASPIRATE%' THEN 'Wound/Aspirate Culture'
+              WHEN UPPER(spec_type_desc) LIKE '%CSF%'
+                OR UPPER(spec_type_desc) LIKE '%CEREBROSPINAL%' THEN 'CSF Culture'
+              WHEN UPPER(spec_type_desc) LIKE '%FLUID%'
+                OR UPPER(spec_type_desc) LIKE '%JOINT%'
+                OR UPPER(spec_type_desc) LIKE '%ASCITES%' THEN 'Body Fluid Culture'
+              WHEN UPPER(spec_type_desc) LIKE '%STOOL%' THEN 'Stool Culture'
+              WHEN UPPER(spec_type_desc) LIKE '%CATHETER%'
+                OR UPPER(spec_type_desc) LIKE '%LINE%' THEN 'Catheter/Line Culture'
+              ELSE 'Other Culture'
+            END
+          ) AS activity_l2,
+          FALSE AS is_excluded
+        FROM `physionet-data.mimiciv_3_1_hosp.microbiologyevents`
+        WHERE test_name IS NOT NULL AND spec_type_desc IS NOT NULL
+        GROUP BY test_name
+
+    # =========================================================================
+    # 1.1.3. [emar] L1(NDC 제형) → L2(커스텀 그룹) | 31 → 6종
+    # =========================================================================
+    - type: "dict"
+      mapping:
+        # Oral (12)
+        "Oral Product": "Oral"
+        "Pill": "Oral"
+        "Oral Liquid Product": "Oral"
+        "Oral Powder Product": "Oral"
+        "Chewable Product": "Oral"
+        "Disintegrating Oral Product": "Oral"
+        "Oral Gel Product": "Oral"
+        "Oral Film Product": "Oral"
+        "Oral Paste Product": "Oral"
+        "Granule Product": "Oral"
+        "Wafer Product": "Oral"
+        "Lozenge Product": "Oral"
+        # Injectable (1)
+        "Injectable Product": "Injectable"
+        # Topical_Mucosal (10)
+        "Topical Product": "Topical_Mucosal"
+        "Ophthalmic Product": "Topical_Mucosal"
+        "Rectal Product": "Topical_Mucosal"
+        "Transdermal Product": "Topical_Mucosal"
+        "Mucosal Product": "Topical_Mucosal"
+        "Vaginal Product": "Topical_Mucosal"
+        "Otic Product": "Topical_Mucosal"
+        "Shampoo Product": "Topical_Mucosal"
+        "Paste Product": "Topical_Mucosal"
+        "Medicated Pad or Tape": "Topical_Mucosal"
+        # Inhalation (2)
+        "Inhalant Product": "Inhalation"
+        "Nasal Product": "Inhalation"
+        # Oromucosal (4)
+        "Mouthwash Product": "Oromucosal"
+        "Sublingual Product": "Oromucosal"
+        "Buccal Product": "Oromucosal"
+        "Toothpaste Product": "Oromucosal"
+        # Other (3)
+        "Irrigation Product": "Other"
+        "Dental Product": "Other"
+        "Kit Product": "Other"
+
+    # =========================================================================
+    # 1.1.4. [inputevents] L1 → L2 (커스텀 그룹) | 7 category → 3종
+    # start_/complete_ 접두사가 포함된 L1에 대해 매핑
+    # =========================================================================
+    - type: "dict"
+      mapping:
+        # Medications (start)
+        "start_Medications": "Medications"
+        "start_Antibiotics": "Medications"
+        # Medications (complete)
+        "complete_Medications": "Medications"
+        "complete_Antibiotics": "Medications"
+        # Fluids (start)
+        "start_Fluids/Intake": "Fluids"
+        "start_Blood Products/Colloids": "Fluids"
+        # Fluids (complete)
+        "complete_Fluids/Intake": "Fluids"
+        "complete_Blood Products/Colloids": "Fluids"
+        # Nutrition (start)
+        "start_Nutrition - Enteral": "Nutrition"
+        "start_Nutrition - Parenteral": "Nutrition"
+        "start_Nutrition - Supplements": "Nutrition"
+        # Nutrition (complete)
+        "complete_Nutrition - Enteral": "Nutrition"
+        "complete_Nutrition - Parenteral": "Nutrition"
+        "complete_Nutrition - Supplements": "Nutrition"
+
+    # =========================================================================
+    # [outputevents] L1(d_items.category) → L2('Output') | 2 → 1종
+    # L1 2종을 'Output'으로 일괄 매핑
+    # =========================================================================
+    - type: "custom_sql"
+      sql: |
+        SELECT DISTINCT
+          CAST(category AS STRING) AS activity_l1,
+          'Output' AS activity_l2,
+          FALSE AS is_excluded
+        FROM `physionet-data.mimiciv_3_1_icu.d_items`
+        WHERE linksto = 'outputevents'
+          AND category IS NOT NULL
+
+    # =========================================================================
+    # [procedureevents] L1 → L2('Procedures & Treatments') | 12 → 1종
+    # start_/complete_ 접두사가 포함된 L1 전체를 일괄 매핑
+    # =========================================================================
+    - type: "custom_sql"
+      sql: |
+        SELECT DISTINCT
+          activity_l1,
+          'Procedures & Treatments' AS activity_l2,
+          FALSE AS is_excluded
+        FROM (
+          SELECT DISTINCT CONCAT('start_', CAST(category AS STRING)) AS activity_l1
+          FROM `physionet-data.mimiciv_3_1_icu.d_items`
+          WHERE linksto = 'procedureevents' AND category IS NOT NULL
+            AND category NOT IN ('Medications', 'Antibiotics')
+          UNION DISTINCT
+          SELECT DISTINCT CONCAT('complete_', CAST(category AS STRING)) AS activity_l1
+          FROM `physionet-data.mimiciv_3_1_icu.d_items`
+          WHERE linksto = 'procedureevents' AND category IS NOT NULL
+            AND category NOT IN ('Medications', 'Antibiotics')
+        )
+
+    # =========================================================================
+    # 1.2. 로직 기반 테이블 L2 매핑 (admissions, icustays, transfers)
+    # =========================================================================
+
+    # --- [admissions] L1 → L2 ---
+    # admit_[type] → 'admit', disch_[type] → 'disch', death → 'death'
+    - type: "conditional"
+      source_tables: ["admissions"]
+      conditions:
+        - when: "LIKE 'admit_%'"
+          value: "admit"
+        - when: "LIKE 'disch_%'"
+          value: "disch"
+        - when: "= 'death'"
+          value: "death"
+      default: null
+
+    # --- [icustays] L1 → L2 ---
+    # icu_admit_[unit] → 'icu_admit', icu_disch_[unit] → 'icu_disch'
+    - type: "conditional"
+      source_tables: ["icustays"]
+      conditions:
+        - when: "LIKE 'icu_admit_%'"
+          value: "icu_admit"
+        - when: "LIKE 'icu_disch_%'"
+          value: "icu_disch"
+      default: null
+
+    # --- [transfers] L1 → L2 ---
+    # transfer_in_[unit] → 'transfer_in', transfer_out_[unit] → 'transfer_out'
+    - type: "conditional"
+      source_tables: ["transfers"]
+      conditions:
+        - when: "LIKE 'transfer_in_%'"
+          value: "transfer_in"
+        - when: "LIKE 'transfer_out_%'"
+          value: "transfer_out"
+      default: null

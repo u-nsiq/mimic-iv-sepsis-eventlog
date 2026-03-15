@@ -1,0 +1,338 @@
+# =============================================================================
+# Clinical Event Log Builder - Configuration
+# =============================================================================
+# 이 파일은 MIMIC-IV 데이터셋을 기준으로 한 설정 예시입니다.
+# 새로운 데이터셋(eICU 등)을 추가할 때 이 파일을 복사하여 수정하세요.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# source: 원시 데이터(raw clinical data)가 있는 BigQuery 프로젝트/데이터셋
+# -----------------------------------------------------------------------------
+# source.project: 원시 데이터가 저장된 GCP 프로젝트 ID
+# source.datasets: 모듈명 → 데이터셋 이름 매핑
+#   - event_tables에서 module: "hosp" 으로 참조하면 여기서 데이터셋을 찾음
+#   - 값에 "."이 포함되면 (예: "other-project.other_dataset") 해당 프로젝트의 데이터셋으로 직접 접근
+source:
+  project: "physionet-data"
+  datasets:
+    hosp: "mimiciv_3_1_hosp"
+    icu: "mimiciv_3_1_icu"
+
+
+# -----------------------------------------------------------------------------
+# target: 결과물(이벤트 로그)을 저장할 BigQuery 프로젝트/데이터셋
+# -----------------------------------------------------------------------------
+# target.project: 사용자의 GCP 프로젝트 ID (빌링 + 출력)
+# target.dataset: 이벤트 로그 테이블/뷰가 생성될 데이터셋
+target:
+  project: "YOUR_PROJECT_ID"
+  dataset: "event_logs"
+
+
+# -----------------------------------------------------------------------------
+# cohort: 분석 대상 코호트 필터링 (선택사항)
+# -----------------------------------------------------------------------------
+# enabled: true로 설정하면 코호트 테이블과 INNER JOIN하여 대상을 제한
+# bq_table: 코호트 테이블의 전체 경로 (project.dataset.table)
+#   - "table"만 쓰면 target.project.target.dataset.table 로 해석
+#   - "dataset.table"이면 target.project.dataset.table
+#   - "project.dataset.table"이면 그대로 사용
+# case_id_column: 코호트 테이블에서 case_id로 사용할 컬럼명
+cohort:
+  enabled: true
+  bq_table: "YOUR_PROJECT_ID.event_logs.temp_cohort_hadms"
+  case_id_column: "hadm_id"
+
+
+# -----------------------------------------------------------------------------
+# event_tables: 이벤트 추출 대상 테이블 정의
+# -----------------------------------------------------------------------------
+# 4가지 유형으로 분류하여 정의합니다:
+#
+#   journey  : 1행 → 2 이벤트 (start/end). 입원~퇴원 같은 여정 이벤트.
+#              필수: start_column, end_column
+#              선택: start_activity, end_activity (미지정 시 자동 생성)
+#
+#   in_out   : 1행 → 2 이벤트 (in/out). ICU 입퇴실 같은 이동 이벤트.
+#              필수: in_column, out_column, location_column
+#
+#   duration : 1행 → 2 이벤트 (start/end). 동일 activity로 시작/종료 기록.
+#              필수: start_column, end_column
+#              선택: activity_column (미지정 시 자동 생성)
+#
+#   one_off  : 1행 → 1 이벤트. 처방, 검사 같은 단발성 이벤트.
+#              필수: timestamp_column
+#              선택: activity_column (미지정 시 자동 생성)
+#
+# 공통 필드:
+#   table           : (필수) 소스 테이블명
+#   module          : (선택) source.datasets의 키로 데이터셋 결정
+#   dataset         : (선택) 데이터셋 직접 지정 (module보다 우선)
+#   case_id_column  : (선택) 케이스 ID 컬럼 (기본값: hadm_id)
+#   filter          : (선택) WHERE 조건 (서브쿼리로 감싸므로 src. 접두사 불필요)
+#   extra           : (선택) 추가 컬럼 매핑 {출력명: 표현식}
+#
+# activity/timestamp 값 규칙 (auto-qualification):
+#   - 단순 컬럼명 (예: drug) → 자동으로 src.drug 으로 변환
+#   - SQL 리터럴 (예: 'Hospital_admit') → 그대로 사용
+#   - SQL 표현식 (예: CASE WHEN src.deathtime IS NOT NULL THEN ...) → 그대로 사용
+#   이 규칙은 activity 필드(start_activity, end_activity, activity_column)와
+#   timestamp 필드(start_column, end_column, in_column, out_column, timestamp_column)
+#   모두에 적용됩니다.
+# -----------------------------------------------------------------------------
+event_tables:
+
+  # =========================================================================
+  # journey: 1행 → 2 이벤트 (start/end), 서로 다른 activity
+  # =========================================================================
+  # EL_Specification 1.2. 로직 기반 테이블 3개:
+  #   admissions  → admit/disch/death 이벤트
+  #   icustays    → icu_admit/icu_disch 이벤트 (in=first_careunit, out=last_careunit)
+  #   transfers   → transfer_in/transfer_out 이벤트 (eventtype='transfer'만)
+  # =========================================================================
+  journey:
+    # --- 입/퇴원 (Admissions) ---
+    # L0: admission_type (8종)
+    # start: admittime → CONCAT('admit_', admission_type)
+    # end:   deathtime 존재 시 'death', 그 외 CONCAT('disch_', admission_type)
+    # 기초 중복 제거: deathtime NOT NULL이면 disch 이벤트 미생성 (CASE로 처리됨)
+    - table: "admissions"
+      module: "hosp"
+      case_id_column: "hadm_id"
+      start_column: "admittime"
+      end_column: "COALESCE(src.deathtime, src.dischtime)"
+      start_activity: "CONCAT('admit_', src.admission_type)"
+      end_activity: "CASE WHEN src.deathtime IS NOT NULL THEN 'death' ELSE CONCAT('disch_', src.admission_type) END"
+      extra:
+        resource: "admit_provider_id"
+
+    # --- ICU 입/퇴실 (ICU Stays) ---
+    # L0: first_careunit / last_careunit (15종)
+    # start: intime → CONCAT('icu_admit_', first_careunit)
+    # end:   outtime → CONCAT('icu_disch_', last_careunit)
+    # Note: in_out 타입은 location_column이 하나뿐이라 journey로 처리
+    - table: "icustays"
+      module: "icu"
+      case_id_column: "hadm_id"
+      stay_id_column: "stay_id"
+      start_column: "intime"
+      end_column: "outtime"
+      start_activity: "CONCAT('icu_admit_', src.first_careunit)"
+      end_activity: "CONCAT('icu_disch_', src.last_careunit)"
+      extra:
+        resource: "CAST(NULL AS STRING)"
+
+    # --- 병동 이동 (Transfers) ---
+    # L0: careunit (41종)
+    # start: intime → CONCAT('transfer_in_', careunit)
+    # end:   outtime → CONCAT('transfer_out_', careunit)
+    # filter: eventtype = 'transfer' (admit/discharge 중복 제외)
+    - table: "transfers"
+      module: "hosp"
+      case_id_column: "hadm_id"
+      start_column: "intime"
+      end_column: "outtime"
+      start_activity: "CONCAT('transfer_in_', src.careunit)"
+      end_activity: "CONCAT('transfer_out_', src.careunit)"
+      filter: "eventtype = 'transfer'"
+      extra:
+        resource: "CAST(NULL AS STRING)"
+
+  # =========================================================================
+  # in_out: 사용하지 않음 (icustays/transfers는 journey로 처리)
+  # =========================================================================
+  in_out: []
+
+  # =========================================================================
+  # duration: 사용하지 않음 (inputevents/procedureevents는 one_off 2개로 분리)
+  # =========================================================================
+  duration: []
+
+  # =========================================================================
+  # one_off: 1행 → 1 이벤트
+  # =========================================================================
+  # 단일 시점 이벤트 5개 + 기간 이벤트 2개(start/complete 분리) = 총 9 엔트리
+  # =========================================================================
+  one_off:
+    # -----------------------------------------------------------------
+    # 단일 시점 이벤트 (Single Timepoint) - 5개 테이블
+    # -----------------------------------------------------------------
+
+    # --- chartevents (ICU) ---
+    # L0: CAST(itemid AS STRING) → 1,864종
+    # L1: d_items.category (reference_join) → 40종
+    # L2: 커스텀 그룹 (1.1.1) → 11종
+    - table: "chartevents"
+      module: "icu"
+      case_id_column: "hadm_id"
+      stay_id_column: "stay_id"
+      timestamp_column: "charttime"
+      activity_column: "CAST(src.itemid AS STRING)"
+      extra:
+        resource: "CAST(src.caregiver_id AS STRING)"
+
+    # --- labevents (Hosp) ---
+    # L0: CAST(itemid AS STRING) → 704종
+    # L1: d_labitems.fluid (reference_join) → 9종
+    # L2: d_labitems.category (reference_join) → 3종
+    - table: "labevents"
+      module: "hosp"
+      case_id_column: "hadm_id"
+      timestamp_column: "charttime"
+      activity_column: "CAST(src.itemid AS STRING)"
+      extra:
+        resource: "order_provider_id"
+
+    # --- microbiologyevents (Hosp) ---
+    # L0: CONCAT(spec_type_desc, ' | ', test_name) → 424종
+    # L1: test_name → 109종
+    # L2: spec_type_desc 기반 커스텀 그룹 (1.1.2) → 10종
+    - table: "microbiologyevents"
+      module: "hosp"
+      case_id_column: "hadm_id"
+      timestamp_column: "charttime"
+      activity_column: "CONCAT(src.spec_type_desc, ' | ', src.test_name)"
+      extra:
+        resource: "order_provider_id"
+
+    # --- emar (Hosp) ---
+    # L0: CAST(pharmacy_id AS STRING) → 878,946종 (매핑 성공 기준)
+    # L1: NDC 제형 (prescriptions.ndc 경유) → 31종
+    # L2: 커스텀 그룹 (1.1.3) → 6종
+    - table: "emar"
+      module: "hosp"
+      case_id_column: "hadm_id"
+      timestamp_column: "charttime"
+      activity_column: "CAST(src.pharmacy_id AS STRING)"
+      extra:
+        resource: "enter_provider_id"
+
+    # --- outputevents (ICU) ---
+    # L0: CAST(itemid AS STRING) → 69종
+    # L1: d_items.category (reference_join) → 2종
+    # L2: 'Output' (일괄 매핑) → 1종
+    - table: "outputevents"
+      module: "icu"
+      case_id_column: "hadm_id"
+      stay_id_column: "stay_id"
+      timestamp_column: "charttime"
+      activity_column: "CAST(src.itemid AS STRING)"
+      extra:
+        resource: "CAST(src.caregiver_id AS STRING)"
+
+    # -----------------------------------------------------------------
+    # 기간 이벤트 (Duration) → start / complete 로 분리
+    # -----------------------------------------------------------------
+    # EL_Specification Phase 2 생명주기 규칙:
+    #   starttime → L1: start_[L1],    L2: [L2]
+    #   endtime   → L1: complete_[L1], L2: [L2]
+    # start_/complete_ 접두사를 L0에 포함시켜 L1 매핑 시 구분 가능하게 함
+    # -----------------------------------------------------------------
+
+    # --- inputevents (ICU) - start event ---
+    # L0: CONCAT('start_', CAST(itemid AS STRING)) → 248종
+    # L1: start_[d_items.category] → 7종
+    # L2: 커스텀 그룹 (1.1.4) → 3종
+    - table: "inputevents"
+      module: "icu"
+      case_id_column: "hadm_id"
+      stay_id_column: "stay_id"
+      timestamp_column: "starttime"
+      activity_column: "CONCAT('start_', CAST(src.itemid AS STRING))"
+      extra:
+        resource: "CAST(src.caregiver_id AS STRING)"
+
+    # --- inputevents (ICU) - complete event ---
+    - table: "inputevents"
+      module: "icu"
+      case_id_column: "hadm_id"
+      stay_id_column: "stay_id"
+      timestamp_column: "endtime"
+      activity_column: "CONCAT('complete_', CAST(src.itemid AS STRING))"
+      extra:
+        resource: "CAST(src.caregiver_id AS STRING)"
+
+    # --- procedureevents (ICU) - start event ---
+    # L0: CONCAT('start_', CAST(itemid AS STRING)) → 151종
+    # L1: start_[d_items.category] → 12종
+    # L2: 'Procedures & Treatments' (일괄 매핑) → 1종
+    - table: "procedureevents"
+      module: "icu"
+      case_id_column: "hadm_id"
+      stay_id_column: "stay_id"
+      timestamp_column: "starttime"
+      activity_column: "CONCAT('start_', CAST(src.itemid AS STRING))"
+      extra:
+        resource: "CAST(src.caregiver_id AS STRING)"
+
+    # --- procedureevents (ICU) - complete event ---
+    - table: "procedureevents"
+      module: "icu"
+      case_id_column: "hadm_id"
+      stay_id_column: "stay_id"
+      timestamp_column: "endtime"
+      activity_column: "CONCAT('complete_', CAST(src.itemid AS STRING))"
+      extra:
+        resource: "CAST(src.caregiver_id AS STRING)"
+
+
+# -----------------------------------------------------------------------------
+# metadata: 이벤트에 추가할 환자/입원 속성 (선택사항)
+# -----------------------------------------------------------------------------
+# enabled: true로 설정하면 Baseline 테이블에 메타데이터 컬럼을 LEFT JOIN
+# columns: 추가할 컬럼 정의
+#   source_table  : 원시 테이블명
+#   source_module : source.datasets의 키 (데이터셋 결정용)
+#   source_dataset: 데이터셋 직접 지정 (source_module보다 우선)
+#   join_on       : JOIN 키 (기본값: subject_id)
+#   column        : 가져올 컬럼명
+metadata:
+  enabled: true
+  columns:
+    gender:
+      source_table: "patients"
+      source_module: "hosp"
+      join_on: "subject_id"
+      column: "gender"
+    anchor_age:
+      source_table: "patients"
+      source_module: "hosp"
+      join_on: "subject_id"
+      column: "anchor_age"
+
+
+# -----------------------------------------------------------------------------
+# mappings: Activity 매핑 테이블 (L1/L2 추상화 계층)
+# -----------------------------------------------------------------------------
+# l1: activity_l0 → activity_l1 매핑 (source_table + activity_raw 기준)
+# l2: activity_l1 → activity_l2 매핑 (activity_l1 기준)
+# 각 매핑 테이블은 target.project.target.dataset에 위치
+# is_excluded = TRUE로 설정된 행은 필터링됨
+mappings:
+  l1:
+    enabled: true
+    bq_table: "l1_mapping"
+  l2:
+    enabled: true
+    bq_table: "l2_mapping"
+
+
+# -----------------------------------------------------------------------------
+# output: 출력 테이블/뷰 이름
+# -----------------------------------------------------------------------------
+output:
+  baseline_table: "baseline_event_log"    # CREATE OR REPLACE TABLE
+  analysis_view: "analysis_event_log"     # CREATE OR REPLACE VIEW
+
+
+# -----------------------------------------------------------------------------
+# analysis: Analysis Event Log 뷰 설정
+# -----------------------------------------------------------------------------
+# case_id: 분석 단위 (subject_id / hadm_id / stay_id)
+# activity_level: 사용할 activity 수준 (l0 / l1 / l2)
+# include_columns: 뷰에 포함할 추가 컬럼 목록
+analysis:
+  case_id: "hadm_id"
+  activity_level: "l1"
+  include_columns: []
