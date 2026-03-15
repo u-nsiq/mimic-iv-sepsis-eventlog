@@ -1,61 +1,115 @@
-# 🏥 MIMIC-IV Sepsis Event Log: Research Archive & Pipeline
+# 🏥 MIMIC-IV Sepsis Event Log
 
 <div align="center">
   <img src="https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=Python&logoColor=white"/>
   <img src="https://img.shields.io/badge/Google%20BigQuery-4285F4?style=flat-square&logo=Google%20BigQuery&logoColor=white"/>
-  <img src="https://img.shields.io/badge/Process%20Mining-FF6F00?style=flat-square"/>
+  <img src="https://img.shields.io/badge/Process%20Mining-FF6F00?style=flat-square&color=FF6F00"/>
+  <img src="https://img.shields.io/badge/MIMIC--IV-v3.1-green?style=flat-square"/>
 </div>
 
-> **Kwangwoon University Data Analytics Lab 학부연구생 연구 활동 종합 기록 (2025.07 ~ 2026.02)**
+<br/>
 
-## 📖 About This Archive
-
-본 리포지토리는 약 7개월간 진행된 헬스케어 프로세스 마이닝(Process Mining) 연구 활동의 **포트폴리오이자 최종 산출물 아카이브**입니다. 
-
-미국 최대 임상 DB인 **MIMIC-IV**와 다기관 데이터 **eICU-CRD**를 활용하여, 패혈증(Sepsis) 환자의 임상 경로를 분석하기 위한 대규모 이벤트 로그(Event Log)를 설계하고 구축했습니다. 
-
-이 공간은 파편화된 임상 기록을 어떻게 분석 가능한 데이터로 추상화하고 결함을 통제했는지에 대한 **'연구 기록(`notebooks/`)'**과, 그 6개월간의 과정을 후임자를 위해 재현 가능한 파이프라인으로 묶어낸 **'엔지니어링 결과물(`clinical_el_builder/`)'**을 모두 담고 있습니다.
+> **광운대학교 Data Analytics Lab 학부연구생 연구 활동 기록 (2025.07 – 2026.02)**
 
 ---
 
-## 🔬 Part 1. Research Journey (연구 및 데이터 엔지니어링)
+## 📖 이 레포지터리에 대해
 
-단순한 데이터 추출을 넘어, 1.1억 건 이상의 임상 데이터를 신뢰할 수 있는 이벤트 로그로 정제하기 위한 고민의 과정입니다.
+이 레포는 **도구 레포가 아닌 연구 기록 레포**다.
 
-### 💡 Core Highlights
-* **Cohort & Event Log Design**
-  * 응급실부터 퇴원까지 환자의 전체 여정을 포착하기 위해 `hadm_id`를 Case ID로 채택하고 Sepsis-3 코호트(13,471건)를 구축했습니다.
-  * 복잡도를 낮추기 위해 L0(원본) $\rightarrow$ L1(임상 의미 단위) $\rightarrow$ L2(최상위 대분류)의 계층적 추상화를 설계했습니다.
-  * 임상 기록의 지연 입력 특성을 고려해 **5분 윈도우 기반 이벤트 병합**을 적용, 핵심 정보 손실 없이 이벤트 볼륨을 **86.2% 축소**했습니다.
-* **Data Quality Assurance (Suriadi 11 Patterns)**
-  * 헬스케어 데이터의 고질적 결함을 학술적 프레임워크 기반으로 검증했습니다. 배치 입력(Form-based Event Capture, 전체 97.5%), 시간 역전(Inadvertent Time Travel) 현상을 규명하고 정제 로직을 확립했습니다.
+7개월간(21회 미팅) MIMIC-IV 임상 데이터를 다루며 패혈증 환자의 케어 프로세스를 분석하기 위한 이벤트 로그를 설계·구축한 과정을 담는다. 연구 목표는 Traditional PM과 Object-Centric PM(OCPM) 관점의 비교 분석이었고, 7개월은 그 전 단계인 **데이터 구축**에 전부 쓰였다.
 
-### 🚧 Key Challenges & Troubleshooting
-> (추후 작성: 로컬 SQLite에서 BigQuery로 마이그레이션 한 이유, 타임스탬프 버그 해결 과정, NDC 결측치 148만 건 복구 전략 등 면접관이 흥미로워할 굵직한 문제 해결 사례 2~3개 요약)
-
-### 📚 Detailed Logs (Blog Posts)
-연구 과정에서의 깊은 고민과 설계 근거(Design Decisions)는 기술 블로그 **JunSik.io**와 단계별 Notebook에 연재되어 있습니다. 상세한 의사결정 기록은 [`docs/design_decisions.md`](./docs/design_decisions.md)를 참고하세요.
-
-| Step | Topic | Blog Post | Notebook |
-| :---: | :--- | :--- | :--- |
-| 1 | **Cohort** | [MIMIC-IV 패혈증 코호트 만들기 - Sepsis-3와 hadm_id](#) | [`01_cohort.ipynb`](./notebooks/01_cohort.ipynb) |
-| 2 | **Abstraction** | [임상 이벤트 로그의 추상화 - L0/L1/L2 계층 설계](#) | [`02_abstraction.ipynb`](./notebooks/02_abstraction.ipynb) |
-| 3 | **Build** | [10개 테이블을 하나의 이벤트 로그로 - 구축 과정과 결정들](#) | [`03_baseline_build.ipynb`](./notebooks/03_baseline_build.ipynb) |
-| 4 | **Quality** | [임상 데이터의 불완전함 - Suriadi 11패턴 검증하기](#) | [`04_quality.ipynb`](./notebooks/04_quality.ipynb) |
-| 5 | **Expansion** | [SQLite에서 BigQuery로, eICU-CRD로의 확장](#) | [`05_eicu_bq.ipynb`](./notebooks/05_eicu_bq.ipynb) |
-| - | **Review** | [Data Analytics Lab 7개월 회고 - 내가 남긴 것과 배운 것](#) | - |
+- **[`notebooks/`](./notebooks/)** — 연구 단위별 핵심 코드와 결과
+- **[`docs/`](./docs/)** — 주요 설계 결정 기록
+- **[`clinical_el_builder/`](./clinical_el_builder/)** — 마지막에 노트북 코드를 재현 가능한 형태로 정리한 인수인계 파이프라인
 
 ---
 
-## 🛠 Part 2. Final Artifact (`clinical_el_builder`)
+## 👤 연구자 / 🔬 랩
 
-연구 활동의 최종 산출물로, 6개월간 파편화되었던 노트북의 로직들을 모아 **YAML 설정 주도형 Python CLI 파이프라인**을 개발했습니다. 후임 연구자가 복잡한 쿼리 작성 없이 전체 이벤트 로그를 재구축하고 확장할 수 있습니다.
+<!-- TODO: 본인 GitHub 프로필 링크 등 추가 -->
 
-👉 **[clinical_el_builder 상세 사용 설명서 보러가기](./clinical_el_builder/README.md)** ---
+| | |
+|--|--|
+| **학교 / 학부** | 광운대학교 소프트웨어학부 |
+| **역할** | 학부연구생 |
+| **기간** | 2025.07 – 2026.02 |
+| **담당** | MIMIC-IV 이벤트 로그 파이프라인 설계·구현, 데이터 품질 검증 |
 
-## 🔒 Data Privacy & Access Policy
-본 리포지토리의 소스 코드는 데이터 전처리 로직만 포함하며, 원본 데이터베이스나 환자 식별 정보(PHI)는 일절 포함하지 않습니다. 코드를 실행하려면 [PhysioNet](https://physionet.org/)의 규정에 따라 데이터 사용 교육(CITI) 이수 및 접근 권한 승인이 필요합니다.
+| | |
+|--|--|
+| **랩** | Data Analytics Lab, School of Information Convergence, Kwangwoon University |
+| **참여** | 2인 (MIMIC-IV 담당 + eICU 보조) |
 
 ---
-**Jun Sik Kim** Software Engineering Dept., Kwangwoon Univ.  
-[Tech Blog - JunSik.io](https://junsik.io) | wnstlr0830@gmail.com
+
+## 📊 핵심 수치
+
+| 항목 | 수치 |
+|------|-----:|
+| 패혈증 코호트 (MIMIC-IV) | **13,471건** 입원 / **11,081명** 환자 |
+| 이벤트 소스 테이블 | 10개 |
+| Raw EL (BigQuery) | 111,208,580건 |
+| Baseline EL — L0 (필터링 후) | **76,062,216건** |
+| L1 추상화 후 (5분 윈도우) | 13,617,405건 **(−82.1%)** |
+| L2 추상화 후 (5분 윈도우) | 10,483,531건 **(−86.2%)** |
+| chartevents 카디널리티 L0→L2 | 1,864종 → 11종 **(−99.4%)** |
+| emar 매핑 손실률 | 9.8% (95,051건) |
+| 품질 검증 (Suriadi 11패턴) | **P2 / P3 / P6 / P7 — PASS** |
+| 비교 데이터셋 (eICU) | 15,731 stays / 13,420명 |
+
+---
+
+## 🔬 Part 1. 연구 과정
+
+### 주요 성과
+
+**코호트 & 이벤트 로그 설계**
+- ICD-10 A40.–/A41.– 기반 성인 패혈증 코호트 13,471건 구축. 응급실 입원부터 퇴원/사망까지 전체 여정을 포착하기 위해 `stay_id` 대신 `hadm_id`를 Case ID로 확정했다.
+- 10개 소스 테이블의 이벤트를 4가지 타입(journey / in_out / duration / one_off)으로 분류해 통합 스키마로 변환했다.
+- 고카디널리티 raw 식별자(chartevents itemid 1,864종)를 L0 → L1 → L2 계층적 추상화로 분석 가능한 수준으로 줄였다.
+
+**데이터 품질 검증 (Suriadi 11 Imperfection Patterns)**
+- 임상 데이터 특유의 결함 패턴을 학술 프레임워크 기반으로 체계적으로 검증했다.
+- P1(배치 입력): 전체 이벤트의 97.5%가 배치로 입력됨을 확인 → 5분 윈도우 병합으로 처리
+- P7(교차 테이블 중복): chartevents ↔ labevents 644,760건 중복 → labevents를 Master 소스로 확정
+
+### 🚧 주요 문제 해결
+
+<!-- TODO: 블로그 포스트 작성 후 링크 추가 -->
+
+> 아래 내용은 각 블로그 포스트에서 상세히 다룬다.
+
+- **타임스탬프 버그** — 이벤트 병합 로직에서 timestamp를 무시하는 버그로 수천만 건 이벤트가 누락됨. 교수님의 "환자 수랑 이벤트 수가 비슷한 건 이상하지 않냐"는 한 마디로 발견.
+- **SQLite → BigQuery 마이그레이션** — 로컬 SQLite DB가 합계 151GB에 달해 협업·재현성의 한계에 도달. BigQuery로 전환 후 수 시간 걸리던 쿼리가 수십 초로 단축.
+- **NDC 결측치 복구** — emar 매핑 과정에서 2,552,081건의 NDC 결측 발생. 4단계 복구 전략(drug명 매칭, GSN, formulary 코드 등)으로 58.2%(1,484,195건) 복구.
+- **icustays Window 위반** — stay_id 2,338개가 병원 입원 기간 밖에 존재. 케이스 단위 삭제(코호트 17.3% 손실)를 기각하고 stay_id 단위 삭제로 결정.
+
+### 📚 연구 단위별 기록
+
+| # | 연구 단위 | 기간 | 노트북 | 블로그 포스트 |
+|:---:|---------|------|--------|-------------|
+| 1 | 코호트 설계 | 2025.07–08 | [01_cohort.ipynb](./notebooks/01_cohort.ipynb) | *(작성 중)* |
+| 2 | 이벤트 추상화 설계 | 2025.08–09 | [02_abstraction.ipynb](./notebooks/02_abstraction.ipynb) | *(작성 중)* |
+| 3 | 이벤트 로그 구축 | 2025.09–11 | [03_baseline_build.ipynb](./notebooks/03_baseline_build.ipynb) | *(작성 중)* |
+| 4 | 정제 + 품질 검증 | 2025.11–2026.01 | [04_quality.ipynb](./notebooks/04_quality.ipynb) | *(작성 중)* |
+| 5 | BigQuery + eICU 확장 | 2026.01 | [05_eicu_bq.ipynb](./notebooks/05_eicu_bq.ipynb) | *(작성 중)* |
+| — | 7개월 회고 | — | — | *(나중에)* |
+
+---
+
+## 🛠 Part 2. 최종 산출물 (`clinical_el_builder`)
+
+연구 활동의 마지막 단계로, 파편화된 노트북 코드를 후임 연구자가 재현 가능한 형태로 쓸 수 있도록 YAML 설정 기반 Python CLI로 정리했다.
+
+👉 **[`clinical_el_builder/` — 설치·실행 방법 및 아키텍처](./clinical_el_builder/README.md)**
+
+---
+
+## 🔒 데이터 접근
+
+MIMIC-IV는 접근 제한 데이터셋이다. 코드 실행을 위해서는:
+1. [PhysioNet](https://physionet.org) 계정 생성 + CITI 교육 이수
+2. MIMIC-IV 데이터 사용 동의(DUA) 서명
+
+이 레포지터리에는 환자 데이터가 포함되어 있지 않다.
