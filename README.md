@@ -5,8 +5,8 @@
 [![MIMIC-IV](https://img.shields.io/badge/MIMIC--IV-v3.1-green?style=flat-square)](https://physionet.org/content/mimiciv/)
 [![Data](https://img.shields.io/badge/Data-PhysioNet_Credentialed-red?style=flat-square)](https://physionet.org/)
 
-> Clinical event log construction for process mining — MIMIC-IV v3.1 & eICU-CRD
-> Undergraduate Research Archive and Final Pipeline Artifact
+> Clinical event log construction for process mining — MIMIC-IV v3.1 & eICU-CRD  
+> Undergraduate Research Archive and Final Pipeline Artifact  
 > Data Analytics Lab, Kwangwoon University — 2025.07 ~ 2026.02
 
 ---
